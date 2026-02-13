@@ -7,993 +7,887 @@
 <title>Infinite 3D Car Racing</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { overflow: hidden; background: #000; font-family: 'Arial', sans-serif; }
+body { overflow: hidden; background: #000; }
 canvas { display: block; }
 #ui {
-position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-pointer-events: none; color: white;
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    pointer-events: none; color: white; font-family: Arial, sans-serif;
 }
-#speed {
-position: absolute; bottom: 30px; right: 30px;
-font-size: 48px; font-weight: bold;
-text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
-}
-#score {
-position: absolute; top: 20px; left: 20px;
-font-size: 32px; font-weight: bold;
-text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
-}
+#speed { position: absolute; bottom: 30px; right: 30px; font-size: 48px; font-weight: bold; text-shadow: 2px 2px 4px #000; }
+#score { position: absolute; top: 20px; left: 20px; font-size: 28px; font-weight: bold; text-shadow: 2px 2px 4px #000; }
+#gear { position: absolute; bottom: 80px; right: 50px; font-size: 36px; font-weight: bold; text-shadow: 2px 2px 4px #000; color: #ff4444; }
 #message {
-position: absolute; top: 50%; left: 50%;
-transform: translate(-50%, -50%);
-font-size: 64px; font-weight: bold;
-text-shadow: 3px 3px 6px rgba(0,0,0,0.8);
-text-align: center;
-pointer-events: auto;
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 48px; font-weight: bold; text-align: center;
+    text-shadow: 3px 3px 6px #000; pointer-events: auto;
+    line-height: 1.5;
 }
 #controls {
-position: absolute; bottom: 30px; left: 30px;
-font-size: 14px; opacity: 0.7;
-text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
-}
-#minimap {
-position: absolute; top: 20px; right: 20px;
-width: 150px; height: 150px;
-border: 2px solid rgba(255,255,255,0.3);
-border-radius: 50%;
-overflow: hidden;
-background: rgba(0,0,0,0.5);
+    position: absolute; bottom: 20px; left: 20px; font-size: 13px;
+    opacity: 0.6; text-shadow: 1px 1px 2px #000;
 }
 </style>
 </head>
 <body>
-<canvas id="gameCanvas"></canvas>
+<canvas id="c"></canvas>
 <div id="ui">
-<div id="score">Score: 0</div>
-<div id="speed">0 km/h</div>
-<div id="controls">
-↑/W: Accelerate | ↓/S: Brake<br>
-←/A: Left | →/D: Right<br>
-Space: Handbrake | R: Reset
+    <div id="score">Score: 0</div>
+    <div id="speed">0 km/h</div>
+    <div id="gear">N</div>
+    <div id="controls">WASD / Arrows: Drive | Space: Brake</div>
+    <div id="message">🏎️ INFINITE RACER<br><span style="font-size:24px">Press ENTER to start</span></div>
 </div>
-<div id="message">Press ENTER to Start</div>
-<canvas id="minimap" width="150" height="150"></canvas>
-</div>
-
 <script>
-const canvas = document.getElementById('gameCanvas');
-const ctx = canvas.getContext('2d');
-const minimapCanvas = document.getElementById('minimap');
-const minimapCtx = minimapCanvas.getContext('2d');
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+if (!gl) { alert('WebGL not supported'); }
 
-canvas.width = window.innerWidth;
-canvas.height = window.innerHeight;
-
-// Game state
-let gameState = 'waiting'; // waiting, playing, crashed
-let score = 0;
-let highScore = 0;
-let frameCount = 0;
-
-// Keys
-const keys = {};
-window.addEventListener('keydown', e => {
-    keys[e.key.toLowerCase()] = true;
-    keys[e.code] = true;
-    if (e.key === 'Enter' && gameState !== 'playing') startGame();
-    if (e.key.toLowerCase() === 'r') resetCar();
-});
-window.addEventListener('keyup', e => {
-    keys[e.key.toLowerCase()] = false;
-    keys[e.code] = false;
-});
-window.addEventListener('resize', () => {
+// Resize
+function resize() {
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
-});
+    gl.viewport(0, 0, canvas.width, canvas.height);
+}
+window.addEventListener('resize', resize);
+resize();
 
-// Road generation
-const SEGMENT_LENGTH = 200;
-const ROAD_WIDTH = 2000;
-const RUMBLE_WIDTH = 100;
-const LANE_COUNT = 3;
-const DRAW_DISTANCE = 300;
-const FOV = 100;
-const CAM_HEIGHT = 1500;
-const CAM_DEPTH = 1 / Math.tan((FOV / 2) * Math.PI / 180);
+// Shader sources
+const VS = `
+attribute vec3 aPos;
+attribute vec3 aNorm;
+attribute vec3 aColor;
+attribute vec2 aUV;
+uniform mat4 uProj, uView, uModel;
+varying vec3 vColor, vNorm, vWorldPos;
+varying vec2 vUV;
+varying float vFog;
+void main() {
+    vec4 world = uModel * vec4(aPos, 1.0);
+    vWorldPos = world.xyz;
+    gl_Position = uProj * uView * world;
+    vColor = aColor;
+    vNorm = mat3(uModel) * aNorm;
+    vUV = aUV;
+    float dist = length((uView * world).xyz);
+    vFog = clamp(exp(-dist * 0.0012), 0.0, 1.0);
+}`;
 
-let segments = [];
-let totalSegments = 0;
-let trackLength = 0;
+const FS = `
+precision mediump float;
+varying vec3 vColor, vNorm, vWorldPos;
+varying vec2 vUV;
+varying float vFog;
+uniform vec3 uLightDir;
+uniform vec3 uFogColor;
+uniform float uTime;
+void main() {
+    vec3 n = normalize(vNorm);
+    float diff = max(dot(n, normalize(uLightDir)), 0.0);
+    float amb = 0.35;
+    vec3 col = vColor * (amb + diff * 0.65);
+    col = mix(uFogColor, col, vFog);
+    gl_FragColor = vec4(col, 1.0);
+}`;
 
-// Car physics
-let car = {
-    x: 0, // lateral position (-1 to 1)
-    z: 0, // position along track
+function createShader(src, type) {
+    let s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+    return s;
+}
+
+let prog = gl.createProgram();
+gl.attachShader(prog, createShader(VS, gl.VERTEX_SHADER));
+gl.attachShader(prog, createShader(FS, gl.FRAGMENT_SHADER));
+gl.linkProgram(prog);
+gl.useProgram(prog);
+
+let aPos = gl.getAttribLocation(prog, 'aPos');
+let aNorm = gl.getAttribLocation(prog, 'aNorm');
+let aColor = gl.getAttribLocation(prog, 'aColor');
+let aUV = gl.getAttribLocation(prog, 'aUV');
+let uProj = gl.getUniformLocation(prog, 'uProj');
+let uView = gl.getUniformLocation(prog, 'uView');
+let uModel = gl.getUniformLocation(prog, 'uModel');
+let uLightDir = gl.getUniformLocation(prog, 'uLightDir');
+let uFogColor = gl.getUniformLocation(prog, 'uFogColor');
+let uTime = gl.getUniformLocation(prog, 'uTime');
+
+gl.enable(gl.DEPTH_TEST);
+gl.enable(gl.CULL_FACE);
+gl.clearColor(0.05, 0.05, 0.15, 1);
+
+// Matrix math
+function mat4() { let m = new Float32Array(16); m[0]=m[5]=m[10]=m[15]=1; return m; }
+function perspective(fov, aspect, near, far) {
+    let m = new Float32Array(16);
+    let f = 1 / Math.tan(fov / 2);
+    m[0] = f / aspect; m[5] = f;
+    m[10] = (far + near) / (near - far); m[11] = -1;
+    m[14] = 2 * far * near / (near - far);
+    return m;
+}
+function lookAt(eye, target, up) {
+    let m = new Float32Array(16);
+    let zx = eye[0]-target[0], zy = eye[1]-target[1], zz = eye[2]-target[2];
+    let zl = Math.sqrt(zx*zx+zy*zy+zz*zz); zx/=zl; zy/=zl; zz/=zl;
+    let xx = up[1]*zz-up[2]*zy, xy = up[2]*zx-up[0]*zz, xz = up[0]*zy-up[1]*zx;
+    let xl = Math.sqrt(xx*xx+xy*xy+xz*xz); xx/=xl; xy/=xl; xz/=xl;
+    let yx = zy*xz-zz*xy, yy = zz*xx-zx*xz, yz = zx*xy-zy*xx;
+    m[0]=xx; m[1]=yx; m[2]=zx;
+    m[4]=xy; m[5]=yy; m[6]=zy;
+    m[8]=xz; m[9]=yz; m[10]=zz;
+    m[12]=-(xx*eye[0]+xy*eye[1]+xz*eye[2]);
+    m[13]=-(yx*eye[0]+yy*eye[1]+yz*eye[2]);
+    m[14]=-(zx*eye[0]+zy*eye[1]+zz*eye[2]);
+    m[15]=1;
+    return m;
+}
+function translate(m, x, y, z) {
+    let r = new Float32Array(m);
+    r[12] += m[0]*x + m[4]*y + m[8]*z;
+    r[13] += m[1]*x + m[5]*y + m[9]*z;
+    r[14] += m[2]*x + m[6]*y + m[10]*z;
+    return r;
+}
+function rotateY(m, a) {
+    let r = new Float32Array(m);
+    let c = Math.cos(a), s = Math.sin(a);
+    r[0] = m[0]*c + m[8]*s; r[2] = m[2]*c + m[10]*s;
+    r[4] = m[4]*c + m[12-4]*s; 
+    r[8] = m[8]*c - m[0]*s; r[10] = m[10]*c - m[2]*s;
+    r[4] = m[4]*c; r[8] = -m[0]*s + m[8]*c;
+    // redo properly
+    let o = new Float32Array(m);
+    r[0]=o[0]*c+o[8]*s; r[1]=o[1]*c+o[9]*s; r[2]=o[2]*c+o[10]*s; r[3]=o[3]*c+o[11]*s;
+    r[8]=o[8]*c-o[0]*s; r[9]=o[9]*c-o[1]*s; r[10]=o[10]*c-o[2]*s; r[11]=o[11]*c-o[3]*s;
+    r[4]=o[4]; r[5]=o[5]; r[6]=o[6]; r[7]=o[7];
+    r[12]=o[12]; r[13]=o[13]; r[14]=o[14]; r[15]=o[15];
+    return r;
+}
+function scaleM(m, x, y, z) {
+    let r = new Float32Array(m);
+    r[0]*=x; r[1]*=x; r[2]*=x; r[3]*=x;
+    r[4]*=y; r[5]*=y; r[6]*=y; r[7]*=y;
+    r[8]*=z; r[9]*=z; r[10]*=z; r[11]*=z;
+    return r;
+}
+
+// Mesh builder
+function createMesh(verts, norms, cols, indices) {
+    let vao = {};
+    vao.count = indices.length;
+    
+    let vb = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
+    vao.vb = vb;
+    
+    let nb = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, nb);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(norms), gl.STATIC_DRAW);
+    vao.nb = nb;
+    
+    let cb = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, cb);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(cols), gl.STATIC_DRAW);
+    vao.cb = cb;
+    
+    let ib = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
+    vao.ib = ib;
+    
+    return vao;
+}
+
+function drawMesh(mesh, model) {
+    gl.uniformMatrix4fv(uModel, false, model);
+    
+    gl.bindBuffer(gl.ARRAY_BUFFER, mesh.vb);
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
+    
+    gl.bindBuffer(gl.ARRAY_BUFFER, mesh.nb);
+    gl.enableVertexAttribArray(aNorm);
+    gl.vertexAttribPointer(aNorm, 3, gl.FLOAT, false, 0, 0);
+    
+    gl.bindBuffer(gl.ARRAY_BUFFER, mesh.cb);
+    gl.enableVertexAttribArray(aColor);
+    gl.vertexAttribPointer(aColor, 3, gl.FLOAT, false, 0, 0);
+    
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, mesh.ib);
+    gl.drawElements(gl.TRIANGLES, mesh.count, gl.UNSIGNED_SHORT, 0);
+}
+
+// Build box mesh
+function buildBox(w, h, d, r, g, b) {
+    let hw = w/2, hh = h/2, hd = d/2;
+    let v = [
+        -hw,-hh,-hd, hw,-hh,-hd, hw,hh,-hd, -hw,hh,-hd,
+        -hw,-hh,hd, hw,-hh,hd, hw,hh,hd, -hw,hh,hd,
+        -hw,-hh,-hd, -hw,hh,-hd, -hw,hh,hd, -hw,-hh,hd,
+        hw,-hh,-hd, hw,hh,-hd, hw,hh,hd, hw,-hh,hd,
+        -hw,hh,-hd, hw,hh,-hd, hw,hh,hd, -hw,hh,hd,
+        -hw,-hh,-hd, hw,-hh,-hd, hw,-hh,hd, -hw,-hh,hd,
+    ];
+    let n = [
+        0,0,-1, 0,0,-1, 0,0,-1, 0,0,-1,
+        0,0,1, 0,0,1, 0,0,1, 0,0,1,
+        -1,0,0, -1,0,0, -1,0,0, -1,0,0,
+        1,0,0, 1,0,0, 1,0,0, 1,0,0,
+        0,1,0, 0,1,0, 0,1,0, 0,1,0,
+        0,-1,0, 0,-1,0, 0,-1,0, 0,-1,0,
+    ];
+    let c = [];
+    for (let i = 0; i < 24; i++) c.push(r, g, b);
+    let idx = [];
+    for (let f = 0; f < 6; f++) {
+        let o = f * 4;
+        idx.push(o,o+1,o+2, o,o+2,o+3);
+    }
+    return createMesh(v, n, c, idx);
+}
+
+// Build cylinder (for trees)
+function buildCylinder(radius, height, segs, r, g, b) {
+    let v = [], n = [], c = [], idx = [];
+    for (let i = 0; i <= segs; i++) {
+        let a = (i / segs) * Math.PI * 2;
+        let x = Math.cos(a) * radius, z = Math.sin(a) * radius;
+        v.push(x, 0, z);
+        n.push(Math.cos(a), 0, Math.sin(a));
+        c.push(r, g, b);
+        v.push(x, height, z);
+        n.push(Math.cos(a), 0, Math.sin(a));
+        c.push(r * 0.8, g * 0.8, b * 0.8);
+    }
+    for (let i = 0; i < segs; i++) {
+        let a = i * 2, b2 = a + 1, c2 = a + 2, d = a + 3;
+        idx.push(a, c2, b2, b2, c2, d);
+    }
+    return createMesh(v, n, c, idx);
+}
+
+// Build cone (for tree tops)
+function buildCone(radius, height, segs, r, g, b) {
+    let v = [], no = [], co = [], idx = [];
+    // tip
+    v.push(0, height, 0);
+    no.push(0, 1, 0);
+    co.push(r * 1.1, g * 1.1, b * 1.1);
+    for (let i = 0; i <= segs; i++) {
+        let a = (i / segs) * Math.PI * 2;
+        let x = Math.cos(a) * radius, z = Math.sin(a) * radius;
+        v.push(x, 0, z);
+        let ny = radius / height;
+        let nl = Math.sqrt(1 + ny * ny);
+        no.push(Math.cos(a) / nl, ny / nl, Math.sin(a) / nl);
+        co.push(r, g, b);
+    }
+    for (let i = 1; i <= segs; i++) {
+        idx.push(0, i, i + 1);
+    }
+    return createMesh(v, no, co, idx);
+}
+
+// Road chunk building
+const ROAD_W = 12;
+const CHUNK_LEN = 20;
+const SEGMENTS_PER_CHUNK = 10;
+const SEG_LEN = CHUNK_LEN / SEGMENTS_PER_CHUNK;
+
+class RoadChunk {
+    constructor(index, prevEnd) {
+        this.index = index;
+        this.zStart = index * CHUNK_LEN;
+        this.curve = 0;
+        this.hillFreq = 0;
+        this.hillAmp = 0;
+        this.objects = [];
+        this.mesh = null;
+        this.barrierMeshL = null;
+        this.barrierMeshR = null;
+        this.groundMesh = null;
+        
+        // Procedural params based on index
+        let seed = index * 7919;
+        let hash = (s) => { s = ((s >> 16) ^ s) * 0x45d9f3b; s = ((s >> 16) ^ s) * 0x45d9f3b; return ((s >> 16) ^ s) / 2147483647; };
+        let h1 = hash(seed), h2 = hash(seed + 1), h3 = hash(seed + 2);
+        
+        this.curve = (h1 - 0.5) * 0.08;
+        this.hillAmp = h2 * 4;
+        this.hillFreq = 0.3 + h3 * 0.5;
+        
+        this.generate(prevEnd);
+    }
+    
+    getY(localZ) {
+        return Math.sin((this.zStart + localZ) * this.hillFreq * 0.1) * this.hillAmp;
+    }
+    
+    getCurveX(localZ) {
+        let t = localZ / CHUNK_LEN;
+        return this.curve * t * t * CHUNK_LEN * 5;
+    }
+    
+    generate(prevEnd) {
+        let verts = [], norms = [], cols = [], indices = [];
+        let gverts = [], gnorms = [], gcols = [], gindices = [];
+        let bvL = [], bnL = [], bcL = [], biL = [];
+        let bvR = [], bnR = [], bcR = [], biR = [];
+        
+        let vi = 0, gi = 0, bli = 0, bri = 0;
+        
+        for (let s = 0; s < SEGMENTS_PER_CHUNK; s++) {
+            let z0 = s * SEG_LEN;
+            let z1 = (s + 1) * SEG_LEN;
+            let y0 = this.getY(z0);
+            let y1 = this.getY(z1);
+            let cx0 = this.getCurveX(z0);
+            let cx1 = this.getCurveX(z1);
+            
+            let dark = s % 2 === 0;
+            let roadR = dark ? 0.25 : 0.28;
+            let roadG = dark ? 0.25 : 0.28;
+            let roadB = dark ? 0.27 : 0.30;
+            
+            // Road surface
+            let p0 = vi;
+            verts.push(cx0 - ROAD_W, y0, z0, cx0 + ROAD_W, y0, z0, cx1 + ROAD_W, y1, z1, cx1 - ROAD_W, y1, z1);
+            for (let i = 0; i < 4; i++) { norms.push(0, 1, 0); cols.push(roadR, roadG, roadB); }
+            indices.push(p0, p0+1, p0+2, p0, p0+2, p0+3);
+            vi += 4;
+            
+            // Lane markings (white dashes)
+            if (!dark) {
+                let lw = 0.15;
+                for (let lane = -1; lane <= 1; lane++) {
+                    if (lane === 0) continue;
+                    let lx0 = cx0 + lane * (ROAD_W / 2);
+                    let lx1 = cx1 + lane * (ROAD_W / 2);
+                    let p = vi;
+                    verts.push(lx0 - lw, y0 + 0.02, z0, lx0 + lw, y0 + 0.02, z0, lx1 + lw, y1 + 0.02, z1, lx1 - lw, y1 + 0.02, z1);
+                    for (let i = 0; i < 4; i++) { norms.push(0, 1, 0); cols.push(0.9, 0.9, 0.9); }
+                    indices.push(p, p+1, p+2, p, p+2, p+3);
+                    vi += 4;
+                }
+            }
+            
+            // Center line (yellow)
+            {
+                let lw = 0.1;
+                let p = vi;
+                verts.push(cx0 - lw, y0 + 0.02, z0, cx0 + lw, y0 + 0.02, z0, cx1 + lw, y1 + 0.02, z1, cx1 - lw, y1 + 0.02, z1);
+                for (let i = 0; i < 4; i++) { norms.push(0, 1, 0); cols.push(0.9, 0.7, 0.1); }
+                indices.push(p, p+1, p+2, p, p+2, p+3);
+                vi += 4;
+            }
+            
+            // Rumble strips / curbs
+            let rumbleW = 0.8;
+            let rumbleR = dark ? 0.8 : 0.9, rumbleG = dark ? 0.1 : 0.9, rumbleB = dark ? 0.1 : 0.9;
+            for (let side of [-1, 1]) {
+                let ex0 = cx0 + side * ROAD_W;
+                let ex1 = cx1 + side * ROAD_W;
+                let p = vi;
+                verts.push(ex0, y0, z0, ex0 + side * rumbleW, y0, z0, ex1 + side * rumbleW, y1, z1, ex1, y1, z1);
+                for (let i = 0; i < 4; i++) { norms.push(0, 1, 0); cols.push(rumbleR, rumbleG, rumbleB); }
+                indices.push(p, p+1, p+2, p, p+2, p+3);
+                vi += 4;
+            }
+            
+            // Ground patches
+            let groundW = 60;
+            let grassR = dark ? 0.08 : 0.1, grassG = dark ? 0.35 : 0.4, grassB = dark ? 0.05 : 0.06;
+            for (let side of [-1, 1]) {
+                let gx0 = cx0 + side * (ROAD_W + rumbleW);
+                let gx1 = cx1 + side * (ROAD_W + rumbleW);
+                let gx0e = cx0 + side * groundW;
+                let gx1e = cx1 + side * groundW;
+                let p = gi;
+                gverts.push(gx0, y0 - 0.05, z0, gx0e, y0 - 0.3, z0, gx1e, y1 - 0.3, z1, gx1, y1 - 0.05, z1);
+                for (let i = 0; i < 4; i++) { gnorms.push(0, 1, 0); gcols.push(grassR, grassG, grassB); }
+                gindices.push(p, p+1, p+2, p, p+2, p+3);
+                gi += 4;
+            }
+            
+            // Barriers
+            let barrierH = 1.0;
+            let barrierW = 0.3;
+            let br = 0.5, bg = 0.5, bb = 0.5;
+            // Left barrier
+            {
+                let bx0 = cx0 - ROAD_W - rumbleW - barrierW;
+                let bx1 = cx1 - ROAD_W - rumbleW - barrierW;
+                let p = bli;
+                // front face
+                bvL.push(bx0, y0, z0, bx0 + barrierW, y0, z0, bx0 + barrierW, y0 + barrierH, z0, bx0, y0 + barrierH, z0);
+                // back face  
+                bvL.push(bx1, y1, z1, bx1 + barrierW, y1, z1, bx1 + barrierW, y1 + barrierH, z1, bx1, y1 + barrierH, z1);
+                // top
+                bvL.push(bx0, y0 + barrierH, z0, bx0 + barrierW, y0 + barrierH, z0, bx1 + barrierW, y1 + barrierH, z1, bx1, y1 + barrierH, z1);
+                // outer side
+                bvL.push(bx0, y0, z0, bx0, y0 + barrierH, z0, bx1, y1 + barrierH, z1, bx1, y1, z1);
+                for (let i = 0; i < 4; i++) { bnL.push(0, 0, -1); bcL.push(br, bg, bb); }
+                for (let i = 0; i < 4; i++) { bnL.push(0, 0, 1); bcL.push(br*0.8, bg*0.8, bb*0.8); }
+                for (let i = 0; i < 4; i++) { bnL.push(0, 1, 0); bcL.push(br*0.9, bg*0.9, bb*0.9); }
+                for (let i = 0; i < 4; i++) { bnL.push(-1, 0, 0); bcL.push(br*0.7, bg*0.7, bb*0.7); }
+                biL.push(p,p+1,p+2, p,p+2,p+3);
+                biL.push(p+4,p+6,p+5, p+4,p+7,p+6);
+                biL.push(p+8,p+9,p+10, p+8,p+10,p+11);
+                biL.push(p+12,p+13,p+14, p+12,p+14,p+15);
+                bli += 16;
+            }
+            // Right barrier
+            {
+                let bx0 = cx0 + ROAD_W + rumbleW;
+                let bx1 = cx1 + ROAD_W + rumbleW;
+                let p = bri;
+                bvR.push(bx0, y0, z0, bx0 + barrierW, y0, z0, bx0 + barrierW, y0 + barrierH, z0, bx0, y0 + barrierH, z0);
+                bvR.push(bx1, y1, z1, bx1 + barrierW, y1, z1, bx1 + barrierW, y1 + barrierH, z1, bx1, y1 + barrierH, z1);
+                bvR.push(bx0, y0 + barrierH, z0, bx0 + barrierW, y0 + barrierH, z0, bx1 + barrierW, y1 + barrierH, z1, bx1, y1 + barrierH, z1);
+                bvR.push(bx0 + barrierW, y0, z0, bx0 + barrierW, y0 + barrierH, z0, bx1 + barrierW, y1 + barrierH, z1, bx1 + barrierW, y1, z1);
+                for (let i = 0; i < 4; i++) { bnR.push(0, 0, -1); bcR.push(br, bg, bb); }
+                for (let i = 0; i < 4; i++) { bnR.push(0, 0, 1); bcR.push(br*0.8, bg*0.8, bb*0.8); }
+                for (let i = 0; i < 4; i++) { bnR.push(0, 1, 0); bcR.push(br*0.9, bg*0.9, bb*0.9); }
+                for (let i = 0; i < 4; i++) { bnR.push(1, 0, 0); bcR.push(br*0.7, bg*0.7, bb*0.7); }
+                biR.push(p,p+1,p+2, p,p+2,p+3);
+                biR.push(p+4,p+6,p+5, p+4,p+7,p+6);
+                biR.push(p+8,p+9,p+10, p+8,p+10,p+11);
+                biR.push(p+12,p+13,p+14, p+12,p+14,p+15);
+                bri += 16;
+            }
+        }
+        
+        this.mesh = createMesh(verts, norms, cols, indices);
+        this.groundMesh = createMesh(gverts, gnorms, gcols, gindices);
+        if (biL.length) this.barrierMeshL = createMesh(bvL, bnL, bcL, biL);
+        if (biR.length) this.barrierMeshR = createMesh(bvR, bnR, bcR, biR);
+        
+        // Generate scenery objects
+        let hash2 = (s) => { s = ((s >> 16) ^ s) * 0x45d9f3b; s = ((s >> 16) ^ s) * 0x45d9f3b; return (((s >> 16) ^ s) & 0x7fffffff) / 2147483647; };
+        for (let i = 0; i < 12; i++) {
+            let h = hash2(this.index * 100 + i);
+            let localZ = h * CHUNK_LEN;
+            let side = hash2(this.index * 100 + i + 50) > 0.5 ? 1 : -1;
+            let dist = 15 + hash2(this.index * 100 + i + 100) * 30;
+            let cx = this.getCurveX(localZ);
+            let y = this.getY(localZ);
+            let type = hash2(this.index * 100 + i + 200);
+            
+            this.objects.push({
+                x: cx + side * dist,
+                y: y,
+                z: this.zStart + localZ,
+                type: type < 0.6 ? 'tree' : type < 0.8 ? 'building' : 'rock',
+                scale: 0.8 + hash2(this.index * 100 + i + 300) * 1.5,
+                colorVar: hash2(this.index * 100 + i + 400)
+            });
+        }
+        
+        // Traffic
+        this.trafficCars = [];
+        let numCars = Math.floor(hash2(this.index * 777) * 3);
+        for (let i = 0; i < numCars; i++) {
+            let lz = hash2(this.index * 333 + i * 77) * CHUNK_LEN;
+            let lane = Math.floor(hash2(this.index * 444 + i * 88) * 3) - 1;
+            let cx2 = this.getCurveX(lz);
+            this.trafficCars.push({
+                x: cx2 + lane * (ROAD_W / 2.5),
+                y: this.getY(lz),
+                z: this.zStart + lz,
+                lane: lane,
+                speed: 15 + hash2(this.index * 555 + i) * 25,
+                colorR: hash2(this.index * 666 + i),
+                colorG: hash2(this.index * 777 + i) * 0.5,
+                colorB: hash2(this.index * 888 + i),
+                localZ: lz
+            });
+        }
+    }
+    
+    draw(identity) {
+        drawMesh(this.mesh, identity);
+        drawMesh(this.groundMesh, identity);
+        if (this.barrierMeshL) drawMesh(this.barrierMeshL, identity);
+        if (this.barrierMeshR) drawMesh(this.barrierMeshR, identity);
+    }
+    
+    destroy() {
+        // Clean up GL buffers
+        let meshes = [this.mesh, this.groundMesh, this.barrierMeshL, this.barrierMeshR];
+        for (let m of meshes) {
+            if (m) {
+                gl.deleteBuffer(m.vb);
+                gl.deleteBuffer(m.nb);
+                gl.deleteBuffer(m.cb);
+                gl.deleteBuffer(m.ib);
+            }
+        }
+    }
+}
+
+// Pre-built meshes for objects
+let treeTrunk, treeTop1, treeTop2, treeTop3;
+let carBody, carRoof, carWheel;
+let buildingBox, rockMesh;
+
+function buildObjectMeshes() {
+    treeTrunk = buildCylinder(0.3, 3, 8, 0.4, 0.25, 0.1);
+    treeTop1 = buildCone(2.0, 4, 8, 0.1, 0.5, 0.1);
+    treeTop2 = buildCone(1.6, 3.5, 8, 0.05, 0.45, 0.08);
+    treeTop3 = buildCone(1.3, 3, 8, 0.15, 0.55, 0.12);
+    
+    carBody = buildBox(2.0, 0.8, 4.0, 0.8, 0.1, 0.1);
+    carRoof = buildBox(1.6, 0.6, 2.0, 0.6, 0.08, 0.08);
+    carWheel = buildBox(0.3, 0.5, 0.5, 0.15, 0.15, 0.15);
+    
+    buildingBox = buildBox(1, 1, 1, 0.5, 0.5, 0.55);
+    rockMesh = buildBox(1, 0.7, 1, 0.4, 0.38, 0.35);
+}
+
+// Game state
+let state = 'menu'; // menu, playing
+let score = 0;
+let time = 0;
+
+// Player car
+let player = {
+    x: 0,
+    y: 0,
+    z: 0,
+    vx: 0,
+    vz: 0,
     speed: 0,
-    maxSpeed: SEGMENT_LENGTH * 60,
-    accel: SEGMENT_LENGTH * 12,
-    braking: SEGMENT_LENGTH * 24,
-    decel: SEGMENT_LENGTH * 6,
-    offRoadDecel: SEGMENT_LENGTH * 16,
-    offRoadMaxSpeed: SEGMENT_LENGTH * 15,
-    steering: 0,
-    steerAngle: 0,
-    bounce: 0,
-    tilt: 0
+    angle: 0, // heading
+    steer: 0,
+    accel: 0,
+    maxSpeed: 80,
+    engineForce: 45,
+    brakeForce: 60,
+    friction: 8,
+    offRoadFriction: 25,
+    turnSpeed: 2.2,
+    driftFactor: 0
 };
 
-// Traffic
-let traffic = [];
-const TRAFFIC_DENSITY = 0.3;
-
-// Colors
-const COLORS = {
-    SKY: { top: '#0a0a2e', bottom: '#1a1a4e' },
-    TREE: { trunk: '#4a2a0a', leaves: ['#0a5a0a', '#0a6a0a', '#0a4a0a'] },
-    ROAD: { dark: '#333333', light: '#383838' },
-    RUMBLE: { dark: '#FF0000', light: '#FFFFFF' },
-    GRASS: { dark: '#0a5a0a', light: '#0a6a0a' },
-    LANE: { dark: '#333333', light: '#CCCCCC' },
-    FOG: '#0a0a2e',
-    START: '#FFFFFF',
-    FINISH: '#000000'
-};
-
-const CAR_COLORS = ['#ff3333', '#3333ff', '#33ff33', '#ffff33', '#ff33ff', '#33ffff', '#ff8833', '#8833ff'];
-
-// Utility functions
-function rand(min, max) { return Math.random() * (max - min) + min; }
-function randInt(min, max) { return Math.floor(rand(min, max)); }
-function interpolate(a, b, t) { return a + (b - a) * t; }
-function exponentialFog(distance, density) { return 1 / Math.pow(Math.E, distance * distance * density); }
-function percentRemaining(n, total) { return (n % total) / total; }
-function increase(start, increment, max) {
-    let result = start + increment;
-    while (result >= max) result -= max;
-    while (result < 0) result += max;
-    return result;
-}
-
-function project(point, camX, camY, camZ, camDepth, width, height, roadWidth) {
-    point.camera = {
-        x: (point.world.x || 0) - camX,
-        y: (point.world.y || 0) - camY,
-        z: (point.world.z || 0) - camZ
-    };
-    if (point.camera.z <= 0) {
-        point.screen = { x: 0, y: 0, w: 0, scale: 0 };
-        return;
-    }
-    point.screen = {
-        scale: camDepth / point.camera.z,
-        x: Math.round(width / 2 + point.screen_scale * point.camera.x * width / 2),
-        y: Math.round(height / 2 - point.screen_scale * point.camera.y * height / 2),
-        w: Math.round(point.screen_scale * roadWidth * width / 2)
-    };
-    point.screen.scale = camDepth / point.camera.z;
-    point.screen.x = Math.round(width / 2 + point.screen.scale * point.camera.x * width / 2);
-    point.screen.y = Math.round(height / 2 - point.screen.scale * point.camera.y * height / 2);
-    point.screen.w = Math.round(point.screen.scale * roadWidth * width / 2);
-}
-
-// Road building
-function addSegment(curve, y) {
-    let n = segments.length;
-    segments.push({
-        index: n,
-        p1: { world: { x: 0, y: lastY(), z: n * SEGMENT_LENGTH }, screen: {}, camera: {} },
-        p2: { world: { x: 0, y: y, z: (n + 1) * SEGMENT_LENGTH }, screen: {}, camera: {} },
-        curve: curve,
-        sprites: [],
-        cars: [],
-        color: Math.floor(n / 3) % 2 ? 'dark' : 'light',
-        looped: false
-    });
-}
-
-function lastY() {
-    return segments.length === 0 ? 0 : segments[segments.length - 1].p2.world.y;
-}
-
-function addRoad(enter, hold, leave, curve, y) {
-    let startY = lastY();
-    let endY = startY + (y || 0) * SEGMENT_LENGTH;
-    let total = enter + hold + leave;
-    for (let n = 0; n < enter; n++) {
-        addSegment(interpolate(0, curve, n / enter), interpolate(startY, endY, n / total));
-    }
-    for (let n = 0; n < hold; n++) {
-        addSegment(curve, interpolate(startY, endY, (enter + n) / total));
-    }
-    for (let n = 0; n < leave; n++) {
-        addSegment(interpolate(curve, 0, n / leave), interpolate(startY, endY, (enter + hold + n) / total));
-    }
-}
-
-function addStraight(num) { addRoad(num || 25, num || 25, num || 25, 0, 0); }
-function addCurve(num, curve, height) { addRoad(num || 25, num || 25, num || 25, curve, height); }
-function addHill(num, height) { addRoad(num || 25, num || 25, num || 25, 0, height); }
-function addDownhill(num, height) { addHill(num, -height); }
-function addSCurves() {
-    addRoad(10, 15, 10, -3, 3);
-    addRoad(10, 15, 10, 5, -5);
-    addRoad(10, 15, 10, 3, 3);
-    addRoad(10, 15, 10, -5, -3);
-    addRoad(10, 15, 10, -2, 0);
-}
-
-function addSprite(n, sprite, offset) {
-    if (n < segments.length) {
-        segments[n].sprites.push({ source: sprite, offset: offset });
-    }
-}
-
-function addTreeSprites() {
-    for (let n = 10; n < segments.length; n += randInt(3, 8)) {
-        let side = Math.random() > 0.5 ? 1 : -1;
-        let offset = side * (1.2 + Math.random() * 3);
-        addSprite(n, { type: 'tree', variant: randInt(0, 3), height: rand(200, 500) }, offset);
-    }
-    // Add buildings/signs occasionally
-    for (let n = 20; n < segments.length; n += randInt(30, 80)) {
-        let side = Math.random() > 0.5 ? 1 : -1;
-        addSprite(n, { type: 'building', variant: randInt(0, 4), height: rand(300, 800) }, side * (1.5 + Math.random() * 2));
-    }
-}
-
-function buildTrack() {
-    segments = [];
-
-    addStraight(50);
-    addCurve(30, 3, 0);
-    addHill(30, 5);
-    addStraight(20);
-    addCurve(40, -4, 0);
-    addDownhill(20, 3);
-    addSCurves();
-    addStraight(30);
-    addCurve(25, 5, 2);
-    addHill(40, 8);
-    addCurve(30, -3, -3);
-    addStraight(40);
-    addCurve(50, -6, 0);
-    addDownhill(30, 5);
-    addStraight(25);
-    addCurve(35, 4, 3);
-    addSCurves();
-    addHill(25, -4);
-    addStraight(50);
-    addCurve(40, 7, 0);
-    addDownhill(40, 8);
-    addStraight(30);
-    addCurve(30, -5, 2);
-    addHill(30, 6);
-    addSCurves();
-    addStraight(50);
-
-    totalSegments = segments.length;
-    trackLength = totalSegments * SEGMENT_LENGTH;
-
-    addTreeSprites();
-}
-
-function findSegment(z) {
-    return segments[Math.floor(z / SEGMENT_LENGTH) % totalSegments];
-}
-
-// Traffic generation
-function resetTraffic() {
-    traffic = [];
-    for (let n = 0; n < totalSegments * TRAFFIC_DENSITY; n++) {
-        let segIndex = randInt(0, totalSegments);
-        let t = {
-            offset: rand(-0.8, 0.8),
-            z: segIndex * SEGMENT_LENGTH + rand(0, SEGMENT_LENGTH),
-            speed: rand(car.maxSpeed / 8, car.maxSpeed / 4),
-            color: CAR_COLORS[randInt(0, CAR_COLORS.length)],
-            type: randInt(0, 3)
-        };
-        let seg = segments[segIndex % totalSegments];
-        seg.cars.push(t);
-        traffic.push(t);
-    }
-}
-
-// Start game
-function startGame() {
-    gameState = 'playing';
-    score = 0;
-    buildTrack();
-    resetCar();
-    resetTraffic();
-    document.getElementById('message').textContent = '';
-}
-
-function resetCar() {
-    car.x = 0;
-    car.z = 0;
-    car.speed = 0;
-    car.steering = 0;
-    car.steerAngle = 0;
-    car.bounce = 0;
-    car.tilt = 0;
-    if (gameState === 'crashed') {
-        gameState = 'playing';
+let keys = {};
+window.addEventListener('keydown', e => {
+    keys[e.code] = true;
+    if (e.code === 'Enter' && state !== 'playing') {
+        state = 'playing';
+        score = 0;
+        player.x = 0; player.y = 0; player.z = 5;
+        player.speed = 0; player.angle = 0; player.steer = 0;
+        player.vx = 0; player.vz = 0;
         document.getElementById('message').textContent = '';
+        // Reset chunks
+        chunks = {};
     }
+});
+window.addEventListener('keyup', e => keys[e.code] = false);
+
+// Chunks management
+let chunks = {};
+const VISIBLE_CHUNKS = 30;
+const BEHIND_CHUNKS = 3;
+
+function getChunk(index) {
+    if (!chunks[index]) {
+        let prev = chunks[index - 1];
+        chunks[index] = new RoadChunk(index, prev);
+    }
+    return chunks[index];
+}
+
+function getWorldY(z) {
+    let ci = Math.floor(z / CHUNK_LEN);
+    let chunk = getChunk(ci);
+    let localZ = z - ci * CHUNK_LEN;
+    return chunk.getY(localZ);
+}
+
+function getWorldCurveX(z) {
+    let ci = Math.floor(z / CHUNK_LEN);
+    let chunk = getChunk(ci);
+    let localZ = z - ci * CHUNK_LEN;
+    return chunk.getCurveX(localZ);
+}
+
+function getRoadCenter(z) {
+    let ci = Math.floor(z / CHUNK_LEN);
+    let chunk = getChunk(ci);
+    let localZ = z - ci * CHUNK_LEN;
+    return chunk.getCurveX(localZ);
 }
 
 // Update
 function update(dt) {
-    if (gameState !== 'playing') return;
-
-    frameCount++;
-    let seg = findSegment(car.z);
-    let speedPercent = car.speed / car.maxSpeed;
-    let dx = dt * 2 * speedPercent;
-    let offRoad = Math.abs(car.x) > 1.0;
-
-    // Steering
-    if (keys['arrowleft'] || keys['a']) {
-        car.steerAngle = interpolate(car.steerAngle, -1, dt * 5);
-    } else if (keys['arrowright'] || keys['d']) {
-        car.steerAngle = interpolate(car.steerAngle, 1, dt * 5);
-    } else {
-        car.steerAngle = interpolate(car.steerAngle, 0, dt * 5);
-    }
-
-    car.x += car.steerAngle * dx;
-
-    // Auto-steer with curves
-    car.x -= (seg.curve * speedPercent * dt * 2.5);
-
-    // Acceleration
-    if (keys['arrowup'] || keys['w']) {
-        car.speed += car.accel * dt;
-    } else if (keys['arrowdown'] || keys['s']) {
-        car.speed -= car.braking * dt;
-    } else {
-        car.speed -= car.decel * dt;
-    }
-
-    // Handbrake
-    if (keys[' ']) {
-        car.speed -= car.braking * 0.7 * dt;
-        car.steerAngle *= 1.5; // Oversteer
-    }
-
-    // Off-road
-    if (offRoad) {
-        car.speed -= car.offRoadDecel * dt;
-        if (car.speed > car.offRoadMaxSpeed) {
-            car.speed = car.offRoadMaxSpeed;
-        }
-    }
-
-    // Clamp
-    car.speed = Math.max(0, Math.min(car.speed, car.maxSpeed));
-    car.x = Math.max(-3, Math.min(3, car.x));
-
-    // Position
-    car.z = increase(car.z, car.speed * dt, trackLength);
-
-    // Tilt for visual effect
-    car.tilt = interpolate(car.tilt, car.steerAngle * speedPercent * 0.1, dt * 8);
-
-    // Bounce
-    car.bounce = Math.sin(frameCount * 0.3) * speedPercent * 3;
-    if (offRoad) car.bounce *= 3;
-
-    // Segment height interpolation (hills)
-    let segPercent = percentRemaining(car.z, SEGMENT_LENGTH);
-    let carY = interpolate(seg.p1.world.y, seg.p2.world.y, segPercent);
-
-    // Score
-    score += car.speed * dt * 0.001;
-
-    // Traffic collision check
-    let carW = 0.4; // car width in road units
-    for (let i = 0; i < traffic.length; i++) {
-        let t = traffic[i];
-        let tSeg = findSegment(t.z);
-        if (Math.abs(t.z - car.z) < 500 || Math.abs(t.z - car.z) > trackLength - 500) {
-            let actualDist = t.z - car.z;
-            if (actualDist < 0) actualDist += trackLength;
-            if (actualDist < 400 && actualDist > 0) {
-                if (Math.abs(car.x - t.offset) < 0.7) {
-                    // Collision!
-                    if (car.speed > car.maxSpeed * 0.1) {
-                        car.speed *= 0.3;
-                        score -= 50;
-                        if (score < 0) score = 0;
-                    }
-                }
-            }
-        }
-    }
-
-    // Update traffic positions
-    for (let i = 0; i < traffic.length; i++) {
-        let t = traffic[i];
-        let oldSeg = findSegment(t.z);
-        t.z = increase(t.z, t.speed * dt, trackLength);
-        let newSeg = findSegment(t.z);
-        if (oldSeg !== newSeg) {
-            let idx = oldSeg.cars.indexOf(t);
-            if (idx !== -1) oldSeg.cars.splice(idx, 1);
-            newSeg.cars.push(t);
-        }
-    }
-
-    // UI
-    document.getElementById('speed').textContent = Math.round(car.speed / 100) + ' km/h';
-    document.getElementById('score').textContent = 'Score: ' + Math.round(score);
-}
-
-// Rendering helpers
-function drawPolygon(ctx, x1, y1, x2, y2, x3, y3, x4, y4, color) {
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(x2, y2);
-    ctx.lineTo(x3, y3);
-    ctx.lineTo(x4, y4);
-    ctx.closePath();
-    ctx.fill();
-}
-
-function drawSegment(width, height, lanes, x1, y1, w1, x2, y2, w2, fog, colors) {
-    let r1 = w1 / Math.max(6, 2 * lanes);
-    let r2 = w2 / Math.max(6, 2 * lanes);
-    let l1 = w1 / Math.max(32, 8 * lanes);
-    let l2 = w2 / Math.max(32, 8 * lanes);
-
-    // Grass
-    ctx.fillStyle = colors.grass;
-    ctx.fillRect(0, y2, width, y1 - y2);
-
-    // Rumble strips
-    drawPolygon(ctx, x1 - w1 - r1, y1, x1 - w1, y1, x2 - w2, y2, x2 - w2 - r2, y2, colors.rumble);
-    drawPolygon(ctx, x1 + w1 + r1, y1, x1 + w1, y1, x2 + w2, y2, x2 + w2 + r2, y2, colors.rumble);
-
-    // Road
-    drawPolygon(ctx, x1 - w1, y1, x1 + w1, y1, x2 + w2, y2, x2 - w2, y2, colors.road);
-
-    // Lane markings
-    if (colors.lane) {
-        let lw1 = w1 * 2 / lanes;
-        let lw2 = w2 * 2 / lanes;
-        let lx1 = x1 - w1 + lw1;
-        let lx2 = x2 - w2 + lw2;
-        for (let lane = 1; lane < lanes; lane++) {
-            drawPolygon(ctx,
-                lx1 - l1 / 2, y1, lx1 + l1 / 2, y1,
-                lx2 + l2 / 2, y2, lx2 - l2 / 2, y2,
-                colors.lane);
-            lx1 += lw1;
-            lx2 += lw2;
-        }
-    }
-
-    // Fog overlay
-    if (fog < 1) {
-        ctx.fillStyle = COLORS.FOG;
-        ctx.globalAlpha = 1 - fog;
-        ctx.fillRect(0, y2, width, y1 - y2);
-        ctx.globalAlpha = 1;
-    }
-}
-
-function drawSprite(sprite, scale, destX, destY, offsetX, clipY) {
-    let s = sprite.source;
-    let h = s.height * scale;
-    let w = (s.type === 'tree' ? 80 : 120) * scale;
-
-    destX += offsetX * scale;
-    destY -= h;
-
-    if (clipY && destY + h > clipY) {
-        h = clipY - destY;
-    }
-    if (h <= 0) return;
-
-    // Draw sprite based on type
-    if (s.type === 'tree') {
-        // Trunk
-        ctx.fillStyle = COLORS.TREE.trunk;
-        ctx.fillRect(destX - w * 0.1, destY + h * 0.5, w * 0.2, h * 0.5);
-        // Leaves
-        ctx.fillStyle = COLORS.TREE.leaves[s.variant % 3];
-        ctx.beginPath();
-        ctx.arc(destX, destY + h * 0.3, w * 0.5, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.beginPath();
-        ctx.arc(destX - w * 0.2, destY + h * 0.45, w * 0.35, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.beginPath();
-        ctx.arc(destX + w * 0.2, destY + h * 0.4, w * 0.4, 0, Math.PI * 2);
-        ctx.fill();
-    } else if (s.type === 'building') {
-        let colors = ['#555', '#666', '#777', '#888'];
-        ctx.fillStyle = colors[s.variant % 4];
-        ctx.fillRect(destX - w * 0.5, destY, w, h);
-        // Windows
-        ctx.fillStyle = '#FFE44D';
-        let rows = Math.floor(h / 30);
-        let cols = Math.floor(w / 25);
-        for (let r = 0; r < rows; r++) {
-            for (let c = 0; c < cols; c++) {
-                if (Math.random() > 0.3) {
-                    ctx.fillRect(
-                        destX - w * 0.4 + c * (w / cols),
-                        destY + 10 + r * (h / rows),
-                        w / cols * 0.5, h / rows * 0.5
-                    );
-                }
-            }
-        }
-    }
-}
-
-function drawTrafficCar(t, scale, destX, destY, clipY) {
-    let w = 60 * scale;
-    let h = 40 * scale;
-    let top = destY - h;
-
-    if (clipY && top + h > clipY) return;
-    if (h < 2) return;
-
-    // Car body
-    ctx.fillStyle = t.color;
-    ctx.fillRect(destX - w, top, w * 2, h);
-
-    // Roof
-    ctx.fillStyle = shadeColor(t.color, -30);
-    ctx.fillRect(destX - w * 0.6, top - h * 0.5, w * 1.2, h * 0.5);
-
-    // Wheels
-    ctx.fillStyle = '#111';
-    ctx.fillRect(destX - w * 1.05, top + h * 0.6, w * 0.3, h * 0.4);
-    ctx.fillRect(destX + w * 0.75, top + h * 0.6, w * 0.3, h * 0.4);
-
-    // Windshield
-    ctx.fillStyle = '#88CCFF';
-    ctx.fillRect(destX - w * 0.5, top - h * 0.45, w * 1.0, h * 0.35);
-
-    // Tail lights
-    ctx.fillStyle = '#FF0000';
-    ctx.fillRect(destX - w, top + h * 0.1, w * 0.15, h * 0.3);
-    ctx.fillRect(destX + w * 0.85, top + h * 0.1, w * 0.15, h * 0.3);
-}
-
-function shadeColor(color, percent) {
-    let num = parseInt(color.replace('#', ''), 16);
-    let r = Math.min(255, Math.max(0, (num >> 16) + percent));
-    let g = Math.min(255, Math.max(0, ((num >> 8) & 0x00FF) + percent));
-    let b = Math.min(255, Math.max(0, (num & 0x0000FF) + percent));
-    return '#' + (0x1000000 + r * 0x10000 + g * 0x100 + b).toString(16).slice(1);
-}
-
-function drawPlayerCar() {
-    let w = canvas.width;
-    let h = canvas.height;
-    let cx = w / 2;
-    let carY = h * 0.78 + car.bounce;
-    let steer = car.steerAngle;
-    let speed = car.speed / car.maxSpeed;
-
-    ctx.save();
-    ctx.translate(cx, carY);
-    ctx.rotate(car.tilt);
-
-    let carW = 70;
-    let carH = 40;
-
-    // Shadow
-    ctx.fillStyle = 'rgba(0,0,0,0.3)';
-    ctx.ellipse(0, carH + 5, carW + 10, 10, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Main body
-    let bodyGrad = ctx.createLinearGradient(-carW, -carH, carW, carH);
-    bodyGrad.addColorStop(0, '#cc0000');
-    bodyGrad.addColorStop(0.5, '#ff2222');
-    bodyGrad.addColorStop(1, '#aa0000');
-    ctx.fillStyle = bodyGrad;
+    if (state !== 'playing') return;
     
-    // Body shape
-    ctx.beginPath();
-    ctx.moveTo(-carW, carH * 0.3);
-    ctx.lineTo(-carW + 5, -carH * 0.2);
-    ctx.lineTo(-carW * 0.6, -carH * 0.6);
-    ctx.lineTo(-carW * 0.3, -carH);
-    ctx.lineTo(carW * 0.3, -carH);
-    ctx.lineTo(carW * 0.6, -carH * 0.6);
-    ctx.lineTo(carW - 5, -carH * 0.2);
-    ctx.lineTo(carW, carH * 0.3);
-    ctx.lineTo(carW, carH);
-    ctx.lineTo(-carW, carH);
-    ctx.closePath();
-    ctx.fill();
-    ctx.strokeStyle = '#880000';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-
-    // Windshield
-    ctx.fillStyle = 'rgba(100, 180, 255, 0.8)';
-    ctx.beginPath();
-    ctx.moveTo(-carW * 0.55, -carH * 0.55);
-    ctx.lineTo(-carW * 0.25, -carH * 0.95);
-    ctx.lineTo(carW * 0.25, -carH * 0.95);
-    ctx.lineTo(carW * 0.55, -carH * 0.55);
-    ctx.closePath();
-    ctx.fill();
-
-    // Roof
-    ctx.fillStyle = '#dd1111';
-    ctx.fillRect(-carW * 0.4, -carH * 0.5, carW * 0.8, carH * 0.3);
-
-    // Headlights
-    ctx.fillStyle = '#FFFF88';
-    ctx.beginPath();
-    ctx.arc(-carW * 0.7, -carH * 0.1, 6, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(carW * 0.7, -carH * 0.1, 6, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Tail lights
-    ctx.fillStyle = speed > 0 && (keys['arrowdown'] || keys['s'] || keys[' ']) ? '#FF0000' : '#880000';
-    ctx.fillRect(-carW + 2, carH * 0.5, 12, 8);
-    ctx.fillRect(carW - 14, carH * 0.5, 12, 8);
-
-    // Wheels
-    ctx.fillStyle = '#222';
-    let wheelOffset = steer * 5;
-    ctx.save();
-    ctx.translate(-carW - 5, -carH * 0.1);
-    ctx.rotate(wheelOffset * 0.1);
-    ctx.fillRect(-5, -8, 10, 16);
-    ctx.restore();
-    ctx.save();
-    ctx.translate(carW + 5, -carH * 0.1);
-    ctx.rotate(wheelOffset * 0.1);
-    ctx.fillRect(-5, -8, 10, 16);
-    ctx.restore();
-
-    ctx.fillRect(-carW - 5, carH * 0.4, 10, 16);
-    ctx.fillRect(carW - 5, carH * 0.4, 10, 16);
-
-    // Speed lines
-    if (speed > 0.5) {
-        ctx.globalAlpha = (speed - 0.5) * 2;
-        ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-        ctx.lineWidth = 1;
-        for (let i = 0; i < 5; i++) {
-            let lx = rand(-carW, carW);
-            ctx.beginPath();
-            ctx.moveTo(lx, carH);
-            ctx.lineTo(lx + rand(-5, 5), carH + rand(20, 60) * speed);
-            ctx.stroke();
-        }
-        ctx.globalAlpha = 1;
+    dt = Math.min(dt, 0.05);
+    time += dt;
+    
+    let accelInput = 0;
+    let steerInput = 0;
+    let braking = false;
+    
+    if (keys['ArrowUp'] || keys['KeyW']) accelInput = 1;
+    if (keys['ArrowDown'] || keys['KeyS']) accelInput = -0.5;
+    if (keys['ArrowLeft'] || keys['KeyA']) steerInput = -1;
+    if (keys['ArrowRight'] || keys['KeyD']) steerInput = 1;
+    if (keys['Space']) braking = true;
+    
+    // Steering
+    let steerSpeed = player.turnSpeed * Math.min(1, player.speed / 20);
+    player.steer += (steerInput * steerSpeed - player.steer * 3) * dt * 5;
+    
+    // Apply steering to angle
+    if (Math.abs(player.speed) > 0.5) {
+        player.angle += player.steer * dt * (player.speed > 0 ? 1 : -1);
     }
-
-    ctx.restore();
-}
-
-// Draw sky with gradient and stars
-function drawBackground() {
-    let skyGrad = ctx.createLinearGradient(0, 0, 0, canvas.height * 0.5);
-    skyGrad.addColorStop(0, '#000011');
-    skyGrad.addColorStop(0.3, '#0a0a3e');
-    skyGrad.addColorStop(0.7, '#1a1a5e');
-    skyGrad.addColorStop(1, '#2a1a4e');
-    ctx.fillStyle = skyGrad;
-    ctx.fillRect(0, 0, canvas.width, canvas.height * 0.5);
-
-    // Stars
-    if (frameCount === 0 || !window._stars) {
-        window._stars = [];
-        for (let i = 0; i < 100; i++) {
-            window._stars.push({
-                x: Math.random() * canvas.width,
-                y: Math.random() * canvas.height * 0.4,
-                r: Math.random() * 2,
-                twinkle: Math.random() * Math.PI * 2
-            });
-        }
+    
+    // Check if on road
+    let roadCenterX = getRoadCenter(player.z);
+    let distFromCenter = Math.abs(player.x - roadCenterX);
+    let onRoad = distFromCenter < ROAD_W;
+    
+    // Engine force
+    if (accelInput > 0) {
+        player.speed += player.engineForce * accelInput * dt;
+    } else if (accelInput < 0) {
+        player.speed += player.engineForce * accelInput * dt;
     }
-    ctx.fillStyle = '#FFF';
-    for (let star of window._stars) {
-        let alpha = 0.5 + 0.5 * Math.sin(frameCount * 0.02 + star.twinkle);
-        ctx.globalAlpha = alpha;
-        ctx.beginPath();
-        ctx.arc(star.x, star.y, star.r, 0, Math.PI * 2);
-        ctx.fill();
+    
+    // Braking
+    if (braking) {
+        if (player.speed > 0) player.speed -= player.brakeForce * dt;
+        else if (player.speed < 0) player.speed += player.brakeForce * dt;
+        if (Math.abs(player.speed) < 1) player.speed = 0;
     }
-    ctx.globalAlpha = 1;
-
-    // Moon
-    ctx.fillStyle = '#FFFFCC';
-    ctx.beginPath();
-    ctx.arc(canvas.width * 0.8, canvas.height * 0.12, 30, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#EEEEAA';
-    ctx.beginPath();
-    ctx.arc(canvas.width * 0.8 + 5, canvas.height * 0.12 - 3, 28, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Mountains/hills silhouette
-    ctx.fillStyle = '#0a0a1e';
-    ctx.beginPath();
-    ctx.moveTo(0, canvas.height * 0.5);
-    let mX = 0;
-    while (mX < canvas.width + 100) {
-        let mH = canvas.height * 0.5 - Math.sin(mX * 0.003 + 1) * 40 - Math.sin(mX * 0.007) * 25 - Math.sin(mX * 0.001 + 2) * 60;
-        ctx.lineTo(mX, mH);
-        mX += 5;
+    
+    // Friction
+    let fric = onRoad ? player.friction : player.offRoadFriction;
+    if (player.speed > 0) {
+        player.speed -= fric * dt;
+        if (player.speed < 0) player.speed = 0;
+    } else if (player.speed < 0) {
+        player.speed += fric * dt;
+        if (player.speed > 0) player.speed = 0;
     }
-    ctx.lineTo(canvas.width, canvas.height * 0.5);
-    ctx.closePath();
-    ctx.fill();
-
-    // City silhouette
-    ctx.fillStyle = '#050510';
-    ctx.beginPath();
-    ctx.moveTo(0, canvas.height * 0.5);
-    mX = 0;
-    while (mX < canvas.width + 50) {
-        let buildingH = 10 + Math.abs(Math.sin(mX * 0.01 + 3)) * 30;
-        ctx.lineTo(mX, canvas.height * 0.5 - buildingH);
-        ctx.lineTo(mX + rand(10, 30), canvas.height * 0.5 - buildingH);
-        ctx.lineTo(mX + rand(10, 30), canvas.height * 0.5 - buildingH + rand(5, 15));
-        mX += rand(15, 40);
+    
+    // Off-road speed limit
+    if (!onRoad && player.speed > player.maxSpeed * 0.3) {
+        player.speed -= player.offRoadFriction * dt;
     }
-    ctx.lineTo(canvas.width, canvas.height * 0.5);
-    ctx.closePath();
-    ctx.fill();
-}
-
-// Draw minimap
-function drawMinimap() {
-    minimapCtx.clearRect(0, 0, 150, 150);
-
-    let cx = 75, cy = 75, radius = 60;
-
-    // Background
-    minimapCtx.fillStyle = 'rgba(0,30,0,0.7)';
-    minimapCtx.beginPath();
-    minimapCtx.arc(cx, cy, radius, 0, Math.PI * 2);
-    minimapCtx.fill();
-
-    // Draw track portion around player
-    let playerSeg = Math.floor(car.z / SEGMENT_LENGTH) % totalSegments;
-    let lookAhead = 100;
-    let lookBehind = 30;
-
-    let prevX = cx, prevY = cy + radius * 0.8;
-    let heading = 0;
-
-    minimapCtx.strokeStyle = '#555';
-    minimapCtx.lineWidth = 4;
-    minimapCtx.beginPath();
-    minimapCtx.moveTo(prevX, prevY);
-
-    for (let i = -lookBehind; i < lookAhead; i++) {
-        let idx = ((playerSeg + i) % totalSegments + totalSegments) % totalSegments;
-        let seg = segments[idx];
-        heading += seg.curve * 0.02;
-        let step = 1.2;
-        let nx = prevX + Math.sin(heading) * step;
-        let ny = prevY - Math.cos(heading) * step;
-        minimapCtx.lineTo(nx, ny);
-        prevX = nx;
-        prevY = ny;
+    
+    // Max speed
+    player.speed = Math.max(-20, Math.min(player.maxSpeed, player.speed));
+    
+    // Move
+    player.x += Math.sin(player.angle) * player.speed * dt;
+    player.z += Math.cos(player.angle) * player.speed * dt;
+    
+    // Y position (follow terrain)
+    let targetY = getWorldY(player.z);
+    player.y += (targetY - player.y) * dt * 10;
+    
+    // Road auto-alignment (subtle pull toward road direction)
+    let roadAngleSample = 0.5;
+    let cx0 = getRoadCenter(player.z);
+    let cx1 = getRoadCenter(player.z + roadAngleSample);
+    let roadAngle = Math.atan2(cx1 - cx0, roadAngleSample);
+    let angleDiff = roadAngle - player.angle;
+    while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+    while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+    if (onRoad && Math.abs(player.speed) > 5) {
+        player.angle += angleDiff * dt * 1.5;
     }
-    minimapCtx.stroke();
-
-    // Draw traffic dots
-    for (let t of traffic) {
-        let tSeg = Math.floor(t.z / SEGMENT_LENGTH) % totalSegments;
-        let diff = tSeg - playerSeg;
-        if (diff > totalSegments / 2) diff -= totalSegments;
-        if (diff < -totalSegments / 2) diff += totalSegments;
-        if (Math.abs(diff) < lookAhead) {
-            let px = cx, py = cy + radius * 0.8;
-            let h = 0;
-            let start = Math.min(0, diff);
-            let end = Math.max(0, diff);
-            for (let j = -lookBehind; j < diff; j++) {
-                let jdx = ((playerSeg + j) % totalSegments + totalSegments) % totalSegments;
-                h += segments[jdx].curve * 0.02;
-                px += Math.sin(h) * 1.2;
-                py -= Math.cos(h) * 1.2;
+    
+    // Collision with traffic
+    let chunkIdx = Math.floor(player.z / CHUNK_LEN);
+    for (let ci = chunkIdx - 1; ci <= chunkIdx + 2; ci++) {
+        let chunk = getChunk(ci);
+        for (let tc of chunk.trafficCars) {
+            let dx = player.x - tc.x;
+            let dz = player.z - tc.z;
+            let dist = Math.sqrt(dx * dx + dz * dz);
+            if (dist < 2.5) {
+                // Bump
+                player.speed *= 0.3;
+                let pushX = dx / Math.max(dist, 0.1) * 5;
+                player.x += pushX * dt * 10;
             }
-            minimapCtx.fillStyle = t.color;
-            minimapCtx.beginPath();
-            minimapCtx.arc(px, py, 2, 0, Math.PI * 2);
-            minimapCtx.fill();
         }
     }
-
-    // Player dot
-    minimapCtx.fillStyle = '#FF0000';
-    minimapCtx.beginPath();
-    let px = cx, py = cy + radius * 0.8;
-    minimapCtx.arc(px, py, 4, 0, Math.PI * 2);
-    minimapCtx.fill();
-
-    // Border
-    minimapCtx.strokeStyle = 'rgba(255,255,255,0.3)';
-    minimapCtx.lineWidth = 2;
-    minimapCtx.beginPath();
-    minimapCtx.arc(cx, cy, radius + 5, 0, Math.PI * 2);
-    minimapCtx.stroke();
+    
+    // Barrier collision
+    let barrierX_L = roadCenterX - ROAD_W - 1.2;
+    let barrierX_R = roadCenterX + ROAD_W + 1.2;
+    if (player.x < barrierX_L + 1.2) {
+        player.x = barrierX_L + 1.2;
+        player.speed *= 0.8;
+        player.angle *= 0.9;
+    }
+    if (player.x > barrierX_R - 0.5) {
+        player.x = barrierX_R - 0.5;
+        player.speed *= 0.8;
+        player.angle *= 0.9;
+    }
+    
+    // Update traffic
+    for (let ci2 = chunkIdx - BEHIND_CHUNKS; ci2 < chunkIdx + VISIBLE_CHUNKS; ci2++) {
+        let chunk = getChunk(ci2);
+        for (let tc of chunk.trafficCars) {
+            tc.z += tc.speed * dt;
+            let tlz = tc.z - chunk.zStart;
+            tc.x = chunk.getCurveX(Math.max(0, Math.min(CHUNK_LEN, tlz))) + tc.lane * (ROAD_W / 2.5);
+            tc.y = chunk.getY(Math.max(0, Math.min(CHUNK_LEN, tlz)));
+        }
+    }
+    
+    // Score
+    score += player.speed * dt * 0.5;
+    
+    // UI
+    let kmh = Math.abs(Math.round(player.speed * 3.6));
+    document.getElementById('speed').textContent = kmh + ' km/h';
+    document.getElementById('score').textContent = 'Score: ' + Math.round(score);
+    
+    let gear = player.speed < 5 ? 'N' : player.speed < 15 ? '1' : player.speed < 30 ? '2' : player.speed < 45 ? '3' : player.speed < 60 ? '4' : player.speed < 72 ? '5' : '6';
+    document.getElementById('gear').textContent = gear;
 }
 
-// Main render
+// Render
 function render() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    if (gameState === 'waiting') {
-        drawBackground();
-        document.getElementById('message').innerHTML = '🏎️ INFINITE RACER 🏎️<br><span style="font-size:24px">Press ENTER to Start</span>';
-        return;
-    }
-
-    let baseSegment = findSegment(car.z);
-    let baseSegPercent = percentRemaining(car.z, SEGMENT_LENGTH);
-    let playerSegment = findSegment(car.z + CAM_HEIGHT);
-    let playerY = interpolate(baseSegment.p1.world.y, baseSegment.p2.world.y, baseSegPercent);
-    let camH = CAM_HEIGHT + playerY;
-
-    let maxY = canvas.height;
-    let x = 0;
-    let dx = -(baseSegment.curve * baseSegPercent);
-
-    drawBackground();
-
-    // Render segments from far to near
-    let startIndex = Math.floor(car.z / SEGMENT_LENGTH);
-
-    for (let n = 0; n < DRAW_DISTANCE; n++) {
-        let segIndex = (startIndex + n) % totalSegments;
-        let seg = segments[segIndex];
-        let looped = (startIndex + n) >= totalSegments;
-
-        let camZ = car.z - (looped ? trackLength : 0);
-
-        project(seg.p1, car.x * ROAD_WIDTH - x, camH, camZ, CAM_DEPTH, canvas.width, canvas.height, ROAD_WIDTH);
-        project(seg.p2, car.x * ROAD_WIDTH - x - dx, camH, camZ, CAM_DEPTH, canvas.width, canvas.height, ROAD_WIDTH);
-
-        x += dx;
-        dx += seg.curve;
-
-        if (seg.p1.camera.z <= CAM_DEPTH || seg.p2.screen.y >= seg.p1.screen.y || seg.p2.screen.y >= maxY) continue;
-
-        let fogDensity = 0.00003;
-        let fog = exponentialFog(n / DRAW_DISTANCE, fogDensity * 1000);
-
-        let colors = {
-            road: seg.color === 'dark' ? COLORS.ROAD.dark : COLORS.ROAD.light,
-            grass: seg.color === 'dark' ? COLORS.GRASS.dark : COLORS.GRASS.light,
-            rumble: seg.color === 'dark' ? COLORS.RUMBLE.dark : COLORS.RUMBLE.light,
-            lane: seg.color === 'dark' ? null : COLORS.LANE.light
-        };
-
-        drawSegment(
-            canvas.width, canvas.height, LANE_COUNT,
-            seg.p1.screen.x, seg.p1.screen.y, seg.p1.screen.w,
-            seg.p2.screen.x, seg.p2.screen.y, seg.p2.screen.w,
-            fog, colors
-        );
-
-        maxY = seg.p2.screen.y;
-    }
-
-    // Render sprites and traffic (near to far for correct overlap)
-    for (let n = DRAW_DISTANCE - 1; n > 0; n--) {
-        let segIndex = (startIndex + n) % totalSegments;
-        let seg = segments[segIndex];
-
-        // Sprites
-        for (let i = 0; i < seg.sprites.length; i++) {
-            let sprite = seg.sprites[i];
-            let spriteScale = seg.p1.screen.scale;
-            let spriteX = seg.p1.screen.x + (spriteScale * sprite.offset * ROAD_WIDTH * canvas.width / 2);
-            drawSprite(sprite, spriteScale * 3000, spriteX, seg.p1.screen.y, 0, null);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    
+    let aspect = canvas.width / canvas.height;
+    let proj = perspective(Math.PI / 3, aspect, 0.5, 800);
+    gl.uniformMatrix4fv(uProj, false, proj);
+    
+    // Camera behind player
+    let camDist = 8;
+    let camH = 4;
+    let camX = player.x - Math.sin(player.angle) * camDist;
+    let camZ = player.z - Math.cos(player.angle) * camDist;
+    let camY = player.y + camH;
+    
+    let lookX = player.x + Math.sin(player.angle) * 10;
+    let lookZ = player.z + Math.cos(player.angle) * 10;
+    let lookY = player.y + 1.5;
+    
+    let view = lookAt([camX, camY, camZ], [lookX, lookY, lookZ], [0, 1, 0]);
+    gl.uniformMatrix4fv(uView, false, view);
+    
+    gl.uniform3f(uLightDir, 0.3, 0.8, 0.5);
+    gl.uniform3f(uFogColor, 0.05, 0.05, 0.15);
+    gl.uniform1f(uTime, time);
+    
+    let identity = mat4();
+    
+    // Draw chunks
+    let currentChunk = Math.floor(player.z / CHUNK_LEN);
+    let chunksToRemove = [];
+    
+    for (let i = currentChunk - BEHIND_CHUNKS; i < currentChunk + VISIBLE_CHUNKS; i++) {
+        let chunk = getChunk(i);
+        chunk.draw(identity);
+        
+        // Draw objects
+        for (let obj of chunk.objects) {
+            let m = mat4();
+            m = translate(m, obj.x, obj.y, obj.z);
+            
+            if (obj.type === 'tree') {
+                let s = obj.scale;
+                let tm = scaleM(m, s, s, s);
+                drawMesh(treeTrunk, tm);
+                let tm2 = translate(m, 0, 3 * s, 0);
+                tm2 = scaleM(tm2, s, s, s);
+                drawMesh(treeTop1, tm2);
+                let tm3 = translate(m, 0, 5 * s, 0);
+                tm3 = scaleM(tm3, s * 0.8, s * 0.8, s * 0.8);
+                drawMesh(treeTop2, tm3);
+            } else if (obj.type === 'building') {
+                let s = obj.scale;
+                let bm = scaleM(m, s * 3, s * 6, s * 3);
+                bm = translate(bm, 0, 0.5, 0);
+                drawMesh(buildingBox, bm);
+            } else {
+                let s = obj.scale;
+                let rm = scaleM(m, s * 2, s * 1.5, s * 2);
+                rm = translate(rm, 0, 0.35, 0);
+                drawMesh(rockMesh, rm);
+            }
         }
-
-        // Traffic cars
-        for (let i = 0; i < seg.cars.length; i++) {
-            let t = seg.cars[i];
-            let spriteScale = seg.p1.screen.scale;
-            let spriteX = seg.p1.screen.x + (spriteScale * t.offset * ROAD_WIDTH * canvas.width / 2);
-            drawTrafficCar(t, spriteScale * 3000, spriteX, seg.p1.screen.y, null);
+        
+        // Draw traffic cars
+        for (let tc of chunk.trafficCars) {
+            let m2 = mat4();
+            m2 = translate(m2, tc.x, tc.y + 0.5, tc.z);
+            
+            // Body with color
+            let cbody = buildBox(2.0, 0.8, 4.0, tc.colorR, tc.colorG, tc.colorB);
+            drawMesh(cbody, m2);
+            // Quick cleanup - we'll do pooling in a smarter way
+            gl.deleteBuffer(cbody.vb); gl.deleteBuffer(cbody.nb); gl.deleteBuffer(cbody.cb); gl.deleteBuffer(cbody.ib);
+            
+            let m3 = translate(m2, 0, 0.7, -0.3);
+            drawMesh(carRoof, m3);
         }
     }
-
+    
     // Draw player car
-    drawPlayerCar();
-
-    // HUD elements
-    drawSpeedometer();
-    drawMinimap();
+    {
+        let m = mat4();
+        m = translate(m, player.x, player.y + 0.5, player.z);
+        m = rotateY(m, -player.angle);
+        
+        // Tilt based on steering
+        drawMesh(carBody, m);
+        
+        let m2 = translate(m, 0, 0.7, -0.3);
+        drawMesh(carRoof, m2);
+        
+        // Wheels
+        for (let wx of [-1.1, 1.1]) {
+            for (let wz of [-1.3, 1.3]) {
+                let mw = translate(m, wx, -0.15, wz);
+                drawMesh(carWheel, mw);
+            }
+        }
+    }
+    
+    // Clean up old chunks
+    for (let key in chunks) {
+        let idx = parseInt(key);
+        if (idx < currentChunk - BEHIND_CHUNKS - 2 || idx > currentChunk + VISIBLE_CHUNKS + 2) {
+            chunks[key].destroy();
+            delete chunks[key];
+        }
+    }
 }
 
-function drawSpeedometer() {
-    let x = canvas.width - 120;
-    let y = canvas.height - 120;
-    let r = 60;
-    let speed = car.speed / car.maxSpeed;
+// Init
+buildObjectMeshes();
 
-    // Background
-    ctx.fillStyle = 'rgba(0,0,0,0.5)';
-    ctx.beginPath();
-    ctx.arc(x, y, r + 5, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Gauge arc
-    ctx.strokeStyle = '#333';
-    ctx.lineWidth = 8;
-    ctx.beginPath();
-    ctx.arc(x, y, r - 10, Math.PI * 0.8, Math.PI * 2.2);
-    ctx.stroke();
-
-    // Speed arc
-    let speedAngle = Math.PI * 0.8 + speed * Math.PI * 1.4;
-    let gradient = ctx.createLinearGradient(x - r, y, x + r, y);
-    gradient.addColorStop(0, '#00FF00');
-    gradient.addColorStop(0.5, '#FFFF00');
-    gradient.addColorStop(1, '#FF0000');
-    ctx.strokeStyle = gradient;
-    ctx.lineWidth = 8;
-    ctx.beginPath();
-    ctx.arc(x, y, r - 10, Math.PI * 0.8, speedAngle);
-    ctx.stroke();
-
-    // Needle
-    ctx.save();
-    ctx.translate(x, y);
-    ctx.rotate(speedAngle);
-    ctx.fillStyle = '#FF3333';
-    ctx.beginPath();
-    ctx.moveTo(-3, 0);
-    ctx.lineTo(0, -(r - 15));
-    ctx.lineTo(3, 0);
-    ctx.fill();
-    ctx.restore();
-
-    // Center dot
-    ctx.fillStyle = '#FFF';
-    ctx.beginPath();
-    ctx.arc(x, y, 5, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Gear indicator
-    let gear = speed < 0.15 ? 1 : speed < 0.3 ? 2 : speed < 0.5 ? 3 : speed < 0.7 ? 4 : speed < 0.85 ? 5 : 6;
-    ctx.fillStyle = '#FFF';
-    ctx.font = 'bold 20px Arial';
-    ctx.textAlign = 'center';
-    ctx.fillText(gear, x, y + 25);
-}
-
-// Game loop
+// Main loop
 let lastTime = 0;
-function gameLoop(timestamp) {
-    let dt = Math.min(1 / 30, (timestamp - lastTime) / 1000);
+function loop(timestamp) {
+    let dt = (timestamp - lastTime) / 1000;
     lastTime = timestamp;
-
+    if (dt > 0.1) dt = 0.016;
+    
+    resize();
     update(dt);
     render();
-
-    requestAnimationFrame(gameLoop);
+    requestAnimationFrame(loop);
 }
-
-// Initialize
-requestAnimationFrame(gameLoop);
+requestAnimationFrame(loop);
 </script>
 </body>
 </html>
